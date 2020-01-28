@@ -93,13 +93,9 @@ var map = new L.Map("map", {
 
 map.addLayer(new L.StamenTileLayer("toner-lite"));
 
-var geojsonGroup = L.layerGroup(),
-		cdGroup = L.layerGroup(),
-		drawnItems = L.featureGroup();
-
-geojsonGroup.addTo(map);
-cdGroup.addTo(map);
-drawnItems.addTo(map);
+var geojsonGroup = L.layerGroup().addTo(map);
+		cdGroup = L.layerGroup().addTo(map);
+		drawnItems = L.featureGroup().addTo(map);
 
 L.control.layers({
   'drawlayer': drawnItems
@@ -248,6 +244,9 @@ function generateClusters(precincts, numberOfClusters) {
 
   function onEachFeature(feature, layer) {
 		feature.properties.cluster = +feature.properties.cluster;
+		layer.on("add", function() {
+			layer.bringToBack();
+		});
 
 		var select = document.createElement("select");
 
