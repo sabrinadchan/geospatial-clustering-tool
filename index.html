@@ -69,6 +69,8 @@ td.num-cell, th.num-cell {
 <body>
 <div id="input">
 <div>Upload precinct geojson: <input type="file" accept=".geojson" id="upload-geojson"></input></div>
+<div>Select base district: <select id="base-district-select"></select>
+</div>
 <div>Number of groupings to generate: <input type="text" id="cluster-count"> <input type="submit" id="submit-clusters" value="Generate groups"></div>
 <div>If you are not satisfied with the initial groups, clicking "generate groups" again will repartition the precincts.</div> 
 <div><a href='#' id='export'><button type="button">Export Work</button></a></div>
@@ -83,6 +85,12 @@ x Fix file export
 x Add "null" office option (color + in caption)
 */
 
+var baseDistricts = [
+  {district: "US Congressional District", file: "us_cd116.geojson"},
+  {district: "NC State House", file: "maricopa_precincts.geojson"},
+  {district: "WI State House", file: "maricopa_precincts.geojson"},
+]
+
 // initialize map
 var map = new L.Map("map", {
     center: [41.88,-87.63],
@@ -94,7 +102,7 @@ var map = new L.Map("map", {
 map.addLayer(new L.StamenTileLayer("toner-lite"));
 
 var geojsonGroup = L.layerGroup().addTo(map);
-		cdGroup = L.layerGroup().addTo(map);
+		baseGroup = L.layerGroup().addTo(map);
 		drawnItems = L.featureGroup().addTo(map);
 
 L.control.layers({
@@ -141,9 +149,34 @@ caption.update = function (d) {
 
 caption.addTo(map);
 
-var color = d3.scaleOrdinal()
-		.range(d3.schemeSet3)
-		.unknown("#76797E");
+var numberOfClusters = 0;
+
+var palette = d3.schemeSet3,
+		color = d3.scaleOrdinal()
+				.range(palette)
+				.unknown("#76797E");
+
+var baseDistrictsSelect = d3.select("#base-district-select");
+
+baseDistrictsSelect.selectAll("option.base-district-option")
+    .data(baseDistricts)
+  .enter().append("option")
+    .attr("class", "base-district-option")
+    .attr("value", d => d.file)
+    .text(d => d.district);
+
+baseDistrictsSelect.on("change", function() {
+
+	d3.json(this.value).then((cds) => {
+		baseGroup.clearLayers();
+		us = L.geoJson(cds, {
+			style: baseDistrictStyle,
+		})
+		us.addTo(baseGroup);
+	});
+});
+
+baseDistrictsSelect.property("value", -1);
 
 function formatNumber(num) {
   return num.toString().replace(/(\d)(?=(\d{3})+(?!\d))/g, '$1,')
@@ -171,11 +204,12 @@ function clusterStyle(feature) {
  	};
 }
 
-function cdStyle(feature) {
+function baseDistrictStyle(feature) {
 	return {
 		color: 'black',
 		weight: 3,
 		fillOpacity: 0,
+		className: "baseDistrict",
 	}
 }
 
@@ -215,7 +249,7 @@ d3.select("#upload-geojson")
 			}
 		})
 
-function generateClusters(precincts, numberOfClusters) {
+function generateClusters(precincts) {
 	if (!+numberOfClusters) {
 		console.log("Must chose an integer > 0")
 		return;
@@ -228,26 +262,36 @@ function generateClusters(precincts, numberOfClusters) {
 	*/
 
 	// weighted clustering takes into account number of doors in precinct
-	var x = precincts.features.map(d => turf.centroid(d, d.properties)),
+	var x = precincts.features.filter(d => d.properties.door_density >= 40).map(d => turf.centroid(d, d.properties)),
 			y = d3.shuffle(x.map(d => Array(d.properties.doors).fill(d)).flat()),
 			centroids = turf.featureCollection(y),
 			clusters = turf.clustersKmeans(centroids, {numberOfClusters: numberOfClusters});
 
 	precincts.features.forEach(f => {
-		var match = clusters.features.find(f2 => f2.properties.objectid_1 === f.properties.objectid_1)
-		f.properties.cluster = match.properties.cluster
+		var match = clusters.features.find(f2 => f2.properties.pct_name === f.properties.pct_name)
+		f.properties.cluster = (match != undefined ? match.properties.cluster : -1)  //(match.properties.door_density < 40 ? -1 : match.properties.cluster);
 	});
 
-	var extent = d3.extent(precincts.features, d => d.properties.cluster),
+	var extent = d3.extent(precincts.features, d => Math.abs(d.properties.cluster)),
   		range = d3.range(extent[0], extent[1] + 1);
   color.domain(range);
 
   function onEachFeature(feature, layer) {
 		feature.properties.cluster = +feature.properties.cluster;
+		
 		layer.on("add", function() {
 			layer.bringToBack();
 		});
 
+		layer.on("click", function(e) {
+			var nextVal = feature.properties.cluster + 1,
+					updatedCluster = (nextVal == numberOfClusters ? -1 : nextVal);
+			feature.properties.cluster = updatedCluster;
+			layer.setStyle({'fillColor': color(updatedCluster)});
+			caption.update(precincts);
+		});
+
+		/*
 		var select = document.createElement("select");
 
 		select.classList.add("district-select");
@@ -269,7 +313,7 @@ function generateClusters(precincts, numberOfClusters) {
 	  	map.closePopup();
 	  });
 
-		layer.bindPopup(select)
+		layer.bindPopup(select)*/
 	}
 
   geojson = L.geoJson(precincts, {
@@ -282,20 +326,16 @@ function generateClusters(precincts, numberOfClusters) {
   caption.update(precincts);
 }
 
+//loadGeojson("maricopa_precincts.geojson");
+
 function loadGeojson(geojsonURL) {
 	caption.update(null);
 	
-	d3.json("us_cd116.geojson").then((cds) => {
-		us = L.geoJson(cds, {
-			style: cdStyle,
-		})
-		us.addTo(cdGroup);
-	});
-
 	d3.json(geojsonURL).then((precincts) => {
 		d3.select("#submit-clusters")
 		.on("click", function() {
-			generateClusters(precincts, document.getElementById("cluster-count").value);
+			numberOfClusters = document.getElementById("cluster-count").value;
+			generateClusters(precincts);
 		})	
 
 		geojson = L.geoJson(precincts, {
