@@ -4,6 +4,7 @@
 <title></title>
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js"></script>
 <script src="https://d3js.org/d3.v5.min.js"></script>
+<script src="https://d3js.org/d3-array.v2.min.js"></script>
 <script src="//d3js.org/topojson.v1.min.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.3.1/dist/leaflet.css"
    integrity="sha512-Rksm5RenBEKSKFjgI3a41vrjkw4EVPlJ3+OiI65vTjIdo9brlAacEuKOiQ5OFh7cOI1bkDwLqdLw3Zg0cRJAAQ=="
@@ -71,6 +72,7 @@ td.num-cell, th.num-cell {
 <div>Upload precinct geojson: <input type="file" accept=".geojson" id="upload-geojson"></input></div>
 <div>Select base district: <select id="base-district-select"></select>
 </div>
+<div>Ignore precincts with door density less than <input type="text" id="door-density-threshold" value=0> doors per square mile</div>
 <div>Number of groupings to generate: <input type="text" id="cluster-count"> <input type="submit" id="submit-clusters" value="Generate groups"></div>
 <div>If you are not satisfied with the initial groups, clicking "generate groups" again will repartition the precincts.</div> 
 <div><a href='#' id='export'><button type="button">Export Work</button></a></div>
@@ -149,8 +151,6 @@ caption.update = function (d) {
 
 caption.addTo(map);
 
-var numberOfClusters = 0;
-
 var palette = d3.schemeSet3,
 		color = d3.scaleOrdinal()
 				.range(palette)
@@ -214,7 +214,7 @@ function baseDistrictStyle(feature) {
 }
 
 function toolTip(p) {
-	return "<table><tr><th colspan='2'>" + p.pct_name + "</th></tr><tr><td>Doors</td><td>" + p.doors + "</td></tr><tr><td>Targets</td><td>" + p.targets + "</td></tr><tr><td>Door density</td><td>" + Math.round(p.door_density) / 100 + "</td></tr></table>";
+	return "<table><tr><th colspan='2'>" + p.pct_name + "</th></tr><tr><td>Doors</td><td>" + p.doors + "</td></tr><tr><td>Targets</td><td>" + p.targets + "</td></tr><tr><td>Doors/sqmi</td><td>" + p.door_density.toFixed(2) + "</td></tr></table>";
 }
 
 function rollupPrecincts(precincts) {
@@ -249,28 +249,48 @@ d3.select("#upload-geojson")
 			}
 		})
 
-function generateClusters(precincts) {
-	if (!+numberOfClusters) {
-		console.log("Must chose an integer > 0")
-		return;
-	}
-	
-	geojsonGroup.clearLayers();
+function generateClusters(precincts, numberOfClusters, doorDensityThreshold) {
 	/* Unweighted clustering by precinct centroid location
 	var centroids = turf.featureCollection((precincts.features.map(d => turf.centroid(d, d.properties)))),
 			clusters = turf.clustersKmeans(centroids, {numberOfClusters: numberOfClusters});
 	*/
 
 	// weighted clustering takes into account number of doors in precinct
-	var x = precincts.features.filter(d => d.properties.door_density >= 40).map(d => turf.centroid(d, d.properties)),
+	var x = precincts.features.filter(d => d.properties.door_density >= doorDensityThreshold).map(d => turf.centroid(d, d.properties)),
 			y = d3.shuffle(x.map(d => Array(d.properties.doors).fill(d)).flat()),
 			centroids = turf.featureCollection(y),
 			clusters = turf.clustersKmeans(centroids, {numberOfClusters: numberOfClusters});
 
-	precincts.features.forEach(f => {
-		var match = clusters.features.find(f2 => f2.properties.pct_name === f.properties.pct_name)
+	return clusters
+}
+
+function joinInPlace(a1, a2, k1, k2) {
+	a1.features.forEach(f => {
+		var match = a2.features.find(f2 => f2.properties[k1] === f.properties[k2])
 		f.properties.cluster = (match != undefined ? match.properties.cluster : -1)  //(match.properties.door_density < 40 ? -1 : match.properties.cluster);
 	});
+}
+
+function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
+	if (+numberOfClusters < 1) {
+		console.log("Must chose an integer > 0")
+		return;
+	}
+
+	geojsonGroup.clearLayers();
+
+	var i,
+			clusterTrials = [];
+			clusterVariance = [];
+	for (i = 0; i < 5; i++) {
+		var clusters = generateClusters(precincts, numberOfClusters, doorDensityThreshold);
+		clusterTrials.push(clusters);
+		joinInPlace(precincts, clusters, "pct_name", "pct_name");
+		clusterVariance.push(d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.targets)));
+	}
+
+	var clusters = clusterTrials[d3.minIndex(clusterVariance)];
+	joinInPlace(precincts, clusters, "pct_name", "pct_name");
 
 	var extent = d3.extent(precincts.features, d => Math.abs(d.properties.cluster)),
   		range = d3.range(extent[0], extent[1] + 1);
@@ -326,16 +346,18 @@ function generateClusters(precincts) {
   caption.update(precincts);
 }
 
-//loadGeojson("maricopa_precincts.geojson");
-
+loadGeojson("maricopa_precincts.geojson");
+var featureGroup;
 function loadGeojson(geojsonURL) {
 	caption.update(null);
 	
 	d3.json(geojsonURL).then((precincts) => {
 		d3.select("#submit-clusters")
 		.on("click", function() {
-			numberOfClusters = document.getElementById("cluster-count").value;
-			generateClusters(precincts);
+			numberOfClusters = +document.getElementById("cluster-count").value;
+			doorDensityThreshold = +document.getElementById("door-density-threshold").value;
+
+			mapClusters(precincts, numberOfClusters, doorDensityThreshold);
 		})	
 
 		geojson = L.geoJson(precincts, {
@@ -344,7 +366,8 @@ function loadGeojson(geojsonURL) {
 	  geojson.bindTooltip(layer => toolTip(layer.feature.properties), {direction: 'bottom', sticky: true});
 
 	  geojson.addTo(geojsonGroup);
-
+	  geojson.eachLayer(layer => layer.bringToBack());
+	 	
 	  var bbox = geojson.getBounds();
     map.flyToBounds(bbox);
 	});
