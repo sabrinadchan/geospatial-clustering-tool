@@ -257,7 +257,7 @@ function generateClusters(precincts, numberOfClusters, doorDensityThreshold) {
 
 	// weighted clustering takes into account number of doors in precinct
 	var x = precincts.features.filter(d => d.properties.door_density >= doorDensityThreshold).map(d => turf.centroid(d, d.properties)),
-			y = d3.shuffle(x.map(d => Array(d.properties.doors).fill(d)).flat()),
+			y = d3.shuffle(x.map(d => Array(Math.ceil(d.properties.doors / 100)).fill(d)).flat()),
 			centroids = turf.featureCollection(y),
 			clusters = turf.clustersKmeans(centroids, {numberOfClusters: numberOfClusters});
 
@@ -282,11 +282,11 @@ function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
 	var i,
 			clusterTrials = [];
 			clusterVariance = [];
-	for (i = 0; i < 5; i++) {
+	for (i = 0; i < 100; i++) {
 		var clusters = generateClusters(precincts, numberOfClusters, doorDensityThreshold);
 		clusterTrials.push(clusters);
 		joinInPlace(precincts, clusters, "pct_name", "pct_name");
-		clusterVariance.push(d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.targets)));
+		clusterVariance.push(d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.doors)));
 	}
 
 	var clusters = clusterTrials[d3.minIndex(clusterVariance)];
