@@ -70,23 +70,22 @@ td.num-cell, th.num-cell {
 <body>
 <div id="input">
 <div>Upload precinct geojson: <input type="file" accept=".geojson" id="upload-geojson"></input></div>
-<div>Select base district: <select id="base-district-select"></select>
+<div>Select base districts: <select id="base-district-select"></select>
 </div>
 <div>Ignore precincts with door density less than <input type="text" id="door-density-threshold" value=0> doors per square mile</div>
-<div>Number of groupings to generate: <input type="text" id="cluster-count"> <input type="submit" id="submit-clusters" value="Generate groups"></div>
+<div>Number of groupings to generate: <input type="text" id="cluster-count"></div>
+<div>
+<input type="radio" id="cluster-by-geo" name="cluster-algo" value="cluster-by-geo" checked>
+<label for="cluster-by-geo">Cluster by geography</label> 
+<input type="radio" id="cluster-evenly" name="cluster-algo" value="cluster-evenly">
+<label for="cluster-evenly">Cluster evenly</label>
+</div>
+<div><input type="submit" id="submit-clusters" value="Generate groups"></div>
 <div>If you are not satisfied with the initial groups, clicking "generate groups" again will repartition the precincts.</div> 
 <div><a href='#' id='export'><button type="button">Export Work</button></a></div>
 </div>
 <div id="map"></div>
 <script>
-/* TO DO:
-x Clustering by door count
-x Add congressional district boundaries; show/hide
-x Add door density to tooltip
-x Fix file export
-x Add "null" office option (color + in caption)
-*/
-
 var baseDistricts = [
   {district: "US Congressional District", file: "us_cd116.geojson"},
   {district: "NC State House", file: "maricopa_precincts.geojson"},
@@ -230,8 +229,8 @@ function rollupPrecincts(precincts) {
 }
 
 function buildTable(obj) {
-	var tableHead = "<table><thead><tr><th class='name-cell'>District</th><th class='num-cell'>Doors</th><th class='num-cell'>Targets</th></tr></thead>",
-			content = obj.sort((a,b) => a.key - b.key).map(d => "<tr><td class='name-cell' style='background-color:" + color(d.key) + "'>" + (d.key >= 0 ? d.key : "N/A") + "</td><td class='num-cell'>" + formatNumber(d.value.doors) + "</td><td class='num-cell'>" + formatNumber(d.value.targets) + "</td></tr>").join('');
+	var tableHead = "<table><thead><tr><th class='name-cell'>Office</th><th class='num-cell'>Doors</th><th class='num-cell'>Targets</th></tr></thead>",
+			content = obj.sort((a,b) => a.key - b.key).map(d => "<tr><td class='name-cell' style='background-color:" + color(d.key) + "'>" + (d.key >= 0 ? "Office " + d.key : "N/A") + "</td><td class='num-cell'>" + formatNumber(d.value.doors) + "</td><td class='num-cell'>" + formatNumber(d.value.targets) + "</td></tr>").join('');
 	return tableHead + content + "</table>"
 }
 
@@ -249,6 +248,30 @@ d3.select("#upload-geojson")
 			}
 		})
 
+function generateForcedEvenClusters(precincts, numberOfClusters, doorDensityThreshold) {
+  let filteredPrecincts = precincts.features.filter(d => d.properties.door_density >= doorDensityThreshold).map(d => turf.centroid(d, d.properties)),
+      clusterDoorThreshold = filteredPrecincts.map(d => d.properties.doors).reduce((a, b) => a + b, 0) / numberOfClusters;
+  filteredPrecincts.forEach(d => d.properties.cluster = numberOfClusters - 1);
+  for (let i = 0; i < numberOfClusters - 1; i++) {
+    let unassignedClusters = filteredPrecincts.filter(d => d.properties.cluster == numberOfClusters - 1),
+        distancesToCenter = unassignedClusters.map(d => turf.distance(turf.centerOfMass(turf.featureCollection(unassignedClusters)), d)),
+        furthestPoint = unassignedClusters[distancesToCenter.indexOf(Math.max(...distancesToCenter))];
+    unassignedClusters.forEach(d => d.properties.dfar = turf.distance(furthestPoint, d));
+    let dFurthest = unassignedClusters.sort((a, b) => a.properties.dfar > b.properties.dfar ? 1 : -1);
+    let cumulativeSum = (sum => value => sum += value)(0);
+    dFurthest.map(d => d.properties.doors).map(cumulativeSum).forEach((d, i) => dFurthest[i].properties.cumSumDoors = d);
+    let nextCluster = dFurthest.filter(d => d.properties.cumSumDoors < clusterDoorThreshold).map(d => d.properties.pct_id);
+    //console.log(nextCluster);
+    filteredPrecincts.forEach(d => {
+      if (nextCluster.includes(d.properties.pct_id)) {
+        d.properties.cluster = i;
+      }
+    });
+  }
+  //console.log(turf.featureCollection(filteredPrecincts));
+  return turf.featureCollection(filteredPrecincts);
+}
+
 function generateClusters(precincts, numberOfClusters, doorDensityThreshold) {
 	/* Unweighted clustering by precinct centroid location
 	var centroids = turf.featureCollection((precincts.features.map(d => turf.centroid(d, d.properties)))),
@@ -256,7 +279,7 @@ function generateClusters(precincts, numberOfClusters, doorDensityThreshold) {
 	*/
 
 	// weighted clustering takes into account number of doors in precinct
-	var x = precincts.features.filter(d => d.properties.door_density >= doorDensityThreshold).map(d => turf.centroid(d, d.properties)),
+	var x = precincts.features.filter(d => d.properties.door_density >= doorDensityThreshold).map(d => turf.centroid(d, {doors: d.properties.doors, pct_id: d.properties.pct_id})),
 			y = d3.shuffle(x.map(d => Array(Math.ceil(d.properties.doors / 100)).fill(d)).flat()),
 			centroids = turf.featureCollection(y),
 			clusters = turf.clustersKmeans(centroids, {numberOfClusters: numberOfClusters});
@@ -279,18 +302,23 @@ function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
 
 	geojsonGroup.clearLayers();
 
-	var i,
-			clusterTrials = [];
-			clusterVariance = [];
-	for (i = 0; i < 100; i++) {
-		var clusters = generateClusters(precincts, numberOfClusters, doorDensityThreshold);
-		clusterTrials.push(clusters);
-		joinInPlace(precincts, clusters, "pct_name", "pct_name");
-		clusterVariance.push(d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.doors)));
+	var clusters;
+	if (document.getElementById("cluster-by-geo").checked) {
+		var i,
+				clusterTrials = [];
+				clusterVariance = [];
+		for (i = 0; i < 100; i++) {
+			clusters = generateClusters(precincts, numberOfClusters, doorDensityThreshold);
+			clusterTrials.push(clusters);
+			joinInPlace(precincts, clusters, "pct_id", "pct_id");
+			clusterVariance.push(d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.doors)));
+		}
+		clusters = clusterTrials[d3.minIndex(clusterVariance)];
+	} else {
+		clusters = generateForcedEvenClusters(precincts, numberOfClusters, doorDensityThreshold);
 	}
 
-	var clusters = clusterTrials[d3.minIndex(clusterVariance)];
-	joinInPlace(precincts, clusters, "pct_name", "pct_name");
+	joinInPlace(precincts, clusters, "pct_id", "pct_id");
 
 	var extent = d3.extent(precincts.features, d => Math.abs(d.properties.cluster)),
   		range = d3.range(extent[0], extent[1] + 1);
@@ -346,7 +374,7 @@ function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
   caption.update(precincts);
 }
 
-loadGeojson("maricopa_precincts.geojson");
+//loadGeojson("maricopa_precincts.geojson");
 var featureGroup;
 function loadGeojson(geojsonURL) {
 	caption.update(null);
