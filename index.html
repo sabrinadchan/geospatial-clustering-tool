@@ -65,6 +65,10 @@ td.num-cell, th.num-cell {
 	text-align: right;
 	padding-left: 10px;
 }
+
+#add-office {
+	cursor: pointer;
+}
 </style>
 </head>
 <body>
@@ -88,8 +92,8 @@ td.num-cell, th.num-cell {
 <script>
 var baseDistricts = [
   {district: "US Congressional District", file: "us_cd116.geojson"},
-  {district: "NC State House", file: "maricopa_precincts.geojson"},
-  {district: "WI State House", file: "maricopa_precincts.geojson"},
+  {district: "NC State House", file: "nc_lower.geojson"},
+  {district: "WI State House", file: "wi_lower.geojson"},
 ]
 
 // initialize map
@@ -229,9 +233,12 @@ function rollupPrecincts(precincts) {
 }
 
 function buildTable(obj) {
+	offices = obj.map(x => +x.key);
+	color.domain().forEach(x => {if (!offices.includes(x)) obj.push({'key': x, 'value': {'doors': 0, 'targets': 0}})});
 	var tableHead = "<table><thead><tr><th class='name-cell'>Office</th><th class='num-cell'>Doors</th><th class='num-cell'>Targets</th></tr></thead>",
-			content = obj.sort((a,b) => a.key - b.key).map(d => "<tr><td class='name-cell' style='background-color:" + color(d.key) + "'>" + (d.key >= 0 ? "Office " + d.key : "N/A") + "</td><td class='num-cell'>" + formatNumber(d.value.doors) + "</td><td class='num-cell'>" + formatNumber(d.value.targets) + "</td></tr>").join('');
-	return tableHead + content + "</table>"
+			content = obj.sort((a,b) => a.key - b.key).map(d => "<tr><td class='name-cell' style='background-color:" + color(d.key) + "'>" + (d.key >= 0 ? "Office " + d.key : "N/A") + "</td><td class='num-cell'>" + formatNumber(d.value.doors) + "</td><td class='num-cell'>" + formatNumber(d.value.targets) + "</td></tr>").join(''),
+			close = "<tr><td id='add-office' class='name-cell' style='background-color:" + color(-1) + "' onclick='addOffice()'>(+) Add Office</td><td></td><td></td></tr></table>";
+	return tableHead + content + close
 }
 
 d3.select("#upload-geojson")
@@ -283,7 +290,6 @@ function generateClusters(precincts, numberOfClusters, doorDensityThreshold) {
 			y = d3.shuffle(x.map(d => Array(Math.ceil(d.properties.doors / 100)).fill(d)).flat()),
 			centroids = turf.featureCollection(y),
 			clusters = turf.clustersKmeans(centroids, {numberOfClusters: numberOfClusters});
-
 	return clusters
 }
 
@@ -311,7 +317,8 @@ function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
 			clusters = generateClusters(precincts, numberOfClusters, doorDensityThreshold);
 			clusterTrials.push(clusters);
 			joinInPlace(precincts, clusters, "pct_id", "pct_id");
-			clusterVariance.push(d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.doors)));
+			var variance = d3.variance(rollupPrecincts(precincts).filter(d => d.key != -1).map(d => d.value.doors));
+			clusterVariance.push(variance === undefined ? 0 : variance);
 		}
 		clusters = clusterTrials[d3.minIndex(clusterVariance)];
 	} else {
@@ -319,9 +326,21 @@ function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
 	}
 
 	joinInPlace(precincts, clusters, "pct_id", "pct_id");
+	return precincts;
+}
 
-	var extent = d3.extent(precincts.features, d => Math.abs(d.properties.cluster)),
-  		range = d3.range(extent[0], extent[1] + 1);
+var officeNum;
+function addOffice() {
+	officeNum += 1;
+	var range = d3.range(color.domain()[0], officeNum)
+	color.domain(range);
+	//caption.update(precincts);
+}
+
+function styleClusters(precincts) {
+	var extent = d3.extent(precincts.features, d => Math.abs(d.properties.cluster));
+	officeNum = extent[1] + 1;
+  var range = d3.range(extent[0], officeNum);
   color.domain(range);
 
   function onEachFeature(feature, layer) {
@@ -333,7 +352,7 @@ function mapClusters(precincts, numberOfClusters, doorDensityThreshold) {
 
 		layer.on("click", function(e) {
 			var nextVal = feature.properties.cluster + 1,
-					updatedCluster = (nextVal == numberOfClusters ? -1 : nextVal);
+					updatedCluster = (nextVal == officeNum ? -1 : nextVal);
 			feature.properties.cluster = updatedCluster;
 			layer.setStyle({'fillColor': color(updatedCluster)});
 			caption.update(precincts);
@@ -381,21 +400,25 @@ function loadGeojson(geojsonURL) {
 	
 	d3.json(geojsonURL).then((precincts) => {
 		d3.select("#submit-clusters")
-		.on("click", function() {
-			numberOfClusters = +document.getElementById("cluster-count").value;
-			doorDensityThreshold = +document.getElementById("door-density-threshold").value;
+			.on("click", function() {
+				numberOfClusters = +document.getElementById("cluster-count").value;
+				doorDensityThreshold = +document.getElementById("door-density-threshold").value;
 
-			mapClusters(precincts, numberOfClusters, doorDensityThreshold);
-		})	
+				precincts = mapClusters(precincts, numberOfClusters, doorDensityThreshold);
+				styleClusters(precincts, numberOfClusters);
+			});
 
-		geojson = L.geoJson(precincts, {
-			style: defaultStyle,
-	  });
-	  geojson.bindTooltip(layer => toolTip(layer.feature.properties), {direction: 'bottom', sticky: true});
+		if ('cluster' in precincts.features[0].properties) {
+			styleClusters(precincts);
+		} else {
+			geojson = L.geoJson(precincts, {
+				style: defaultStyle,
+		  });
+		  geojson.bindTooltip(layer => toolTip(layer.feature.properties), {direction: 'bottom', sticky: true});
+		  geojson.addTo(geojsonGroup);
+	  	geojson.eachLayer(layer => layer.bringToBack());
+		}
 
-	  geojson.addTo(geojsonGroup);
-	  geojson.eachLayer(layer => layer.bringToBack());
-	 	
 	  var bbox = geojson.getBounds();
     map.flyToBounds(bbox);
 	});
