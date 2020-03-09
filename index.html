@@ -334,7 +334,7 @@ function addOffice() {
 	officeNum += 1;
 	var range = d3.range(color.domain()[0], officeNum)
 	color.domain(range);
-	//caption.update(precincts);
+	caption.update(precincts);
 }
 
 function styleClusters(precincts) {
@@ -394,11 +394,14 @@ function styleClusters(precincts) {
 }
 
 //loadGeojson("maricopa_precincts.geojson");
-var featureGroup;
+var featureGroup,
+		precincts;
 function loadGeojson(geojsonURL) {
 	caption.update(null);
 	
-	d3.json(geojsonURL).then((precincts) => {
+	d3.json(geojsonURL).then((data) => {
+		precincts = data;
+		
 		d3.select("#submit-clusters")
 			.on("click", function() {
 				numberOfClusters = +document.getElementById("cluster-count").value;
